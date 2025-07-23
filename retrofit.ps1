@@ -1,87 +1,63 @@
 <#
 .SYNOPSIS
-    Interactive tool to change a single user’s email/UPN *or* bulk‑rename many users from a CSV.
+    Safely rename on‑prem AD users (UPN + mail) with a dry‑run default.
 .DESCRIPTION
-    • Prompts for either a single rename or a CSV path containing OldEmail,NewEmail.
-    • Updates both UserPrincipalName and mail attributes on‑prem AD.
-    • Triggers Azure AD Connect delta sync when done (optional).
-    • Logs results to screen and to Rename‑Log.csv.
+    • Preview mode (default): shows exactly what will change.
+    • Commit mode        : supply -DoIt (alias -Commit) to enact changes.
+    • Accepts single‑user interactive input OR a CSV (OldEmail,NewEmail).
+    • Triggers Azure AD Connect delta sync only when -DoIt is present.
 .NOTES
-    Requires: ActiveDirectory module, Azure AD Connect (for sync).
-    Written July 2025.
+    Requires RSAT ActiveDirectory module and (optionally) ADSync module.
 #>
 
-#----- 0. Safety checks ---------------------------------------------------------
-if (-not (Get-Module -ListAvailable ActiveDirectory)) {
-    Write-Warning "ActiveDirectory module is missing. Install RSAT Tools first."
-    return
-}
-Import-Module ActiveDirectory
-
-# Helper to rename a single account
-function Rename-AdUserEmail {
+function Invoke‑RetrofitRename {
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
     param(
-        [Parameter(Mandatory)][string]$OldEmail,
-        [Parameter(Mandatory)][string]$NewEmail
+        [Alias('Commit')]
+        [switch]$DoIt,
+
+        [string]$CsvPath
     )
-    $user = Get-ADUser -Filter "UserPrincipalName -eq '$OldEmail'" `
-              -Properties SamAccountName, UserPrincipalName, mail  -ErrorAction SilentlyContinue
-    if (-not $user) {
-        Write-Host "✖  $OldEmail not found in AD" -ForegroundColor Red
-        return
-    }
 
-    # 1) Change UPN
-    Set-ADUser -Identity $user.SamAccountName -UserPrincipalName $NewEmail
-    # 2) Change mail attribute (alias for the 'mail' LDAP attribute)
-    Set-ADUser -Identity $user.SamAccountName -EmailAddress $NewEmail  # uses -EmailAddress parameter :contentReference[oaicite:3]{index=3}
+    Import-Module ActiveDirectory -ErrorAction Stop   # ensures Set‑ADUser
 
-    # Success message
-    Write-Host "✔  $OldEmail → $NewEmail" -ForegroundColor Green
-    # Output for logging
-    [PSCustomObject]@{
-        SamAccountName = $user.SamAccountName
-        OldEmail       = $OldEmail
-        NewEmail       = $NewEmail
-        Timestamp      = (Get-Date)
-    }
-}
+    #--- helper ---------------------------------------------------------------
+    function Rename‑One {
+        param($OldEmail,$NewEmail)
+        $user = Get-ADUser -Filter "UserPrincipalName -eq '$OldEmail'" `
+                 -Properties SamAccountName,UserPrincipalName,Mail
+        if(!$user){Write-Warning "✖  $OldEmail not found";return}
 
-#----- 1. Choose mode ----------------------------------------------------------
-Write-Host "`n--- User Email/UPN Renamer ---`n"
-$mode = Read-Host "Change a (S)ingle user or process a (C)SV file? [S/C]"
-$result = @()
-
-switch ($mode.ToUpper()) {
-
-    'S' {
-        $old = Read-Host "Enter CURRENT email (UPN)  e.g. geoffrey.traugott@boom.aero"
-        $newPrefix = Read-Host "Enter NEW alias (everything before @boom.aero)  e.g. geoff.traugott"
-        $new = "$newPrefix@boom.aero"
-        $result += Rename-AdUserEmail -OldEmail $old -NewEmail $new
-    }
-
-    'C' {
-        $path = Read-Host "Enter full path to CSV with columns OldEmail,NewEmail"
-        if (-not (Test-Path $path)) { Write-Warning "File not found"; break }
-        Import-Csv $path | ForEach-Object {
-            $result += Rename-AdUserEmail -OldEmail $_.OldEmail -NewEmail $_.NewEmail
+        $action = "rename $($user.UserPrincipalName) → $NewEmail"
+        if($PSCmdlet.ShouldProcess($action)){
+            # When -DoIt is absent we force -WhatIf
+            $wi = !$DoIt
+            Set-ADUser $user -UserPrincipalName $NewEmail -WhatIf:$wi
+            Set-ADUser $user -EmailAddress    $NewEmail -WhatIf:$wi
+            Write-Host ("{0} {1}" -f ($DoIt?'✔':'WHATIF:'),$action)
         }
     }
 
-    default { Write-Host "No action selected."; return }
-}
-
-#----- 2. Optional Azure AD Connect delta sync ---------------------------------
-$sync = Read-Host "`nTrigger Azure AD Connect delta sync now? [Y/N]"
-if ($sync.ToUpper() -eq 'Y') {
-    try {
-        Start-ADSyncSyncCycle -PolicyType Delta   # needs to run on the AAD Connect server :contentReference[oaicite:4]{index=4}
-        Write-Host "▲  Delta sync triggered."
+    #--- gather targets -------------------------------------------------------
+    if($CsvPath){
+        Import-Csv $CsvPath | ForEach-Object {
+            Rename‑One $_.OldEmail $_.NewEmail
+        }
     }
-    catch { Write-Warning "Could not start sync: $_" }
-}
+    else{
+        $old = Read-Host 'Current email/UPN  (e.g. geoffrey.traugott@boom.aero)'
+        $newLocal = Read-Host 'New alias before @boom.aero (e.g. geoff.traugott)'
+        Rename‑One $old "$newLocal@boom.aero"
+    }
 
-#----- 3. Save a log -----------------------------------------------------------
-if ($result) { $result | Export-Csv Rename-Log.csv -NoTypeInformation }
-Write-Host "`nFinished. Log saved to Rename-Log.csv`n"
+    #--- optional sync --------------------------------------------------------
+    if($DoIt){
+        if(Get-Command Start-ADSyncSyncCycle -ErrorAction SilentlyContinue){
+            Start-ADSyncSyncCycle -PolicyType Delta   # export to Entra ID
+        }
+        else{Write-Warning 'ADSync cmdlets not available on this server.'}
+    }
+    elseif($PSCmdlet.ShouldProcess('Azure AD Connect','Preview delta sync')){
+        Write-Host 'WHATIF: would run Start‑ADSyncSyncCycle -PolicyType Delta'
+    }
+}
