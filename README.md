@@ -1,6 +1,15 @@
 # RETROFIT
 RETROFIT is a powershell script that allows for single, or bulk, upn &amp; mail attribute changes inside of the AD and forces the sync to the Entra Azura AD – Rename Email, Transform Records On‑prem Fast with an Interactive Tool.
 
+Running the script
+Scenario	Command	What happens
+Dry run single user	Invoke-RetrofitRename	Prompts you; shows WHATIF lines only (no change).
+Dry run CSV	Invoke-RetrofitRename -CsvPath .\rename.csv	Reads each row, prints what would be renamed.
+Commit	Invoke-RetrofitRename -CsvPath .\rename.csv -DoIt	Performs the renames, then starts a delta sync.
+
+You can still append ‑WhatIf or ‑Confirm for additional caution, e.g.
+Invoke-RetrofitRename -CsvPath .\rename.csv -DoIt -Confirm.
+
 
 ### How to use
 
